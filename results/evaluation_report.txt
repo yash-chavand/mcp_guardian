@@ -1,0 +1,26 @@
+MCP Anomaly Detection - Evaluation Report
+==================================================
+
+Test set size: 144 (attacks: 24, normal: 120)
+
+Precision : 0.657
+Recall    : 0.958
+F1-score  : 0.780
+ROC-AUC   : 0.980
+
+Confusion Matrix [rows=actual, cols=predicted]:
+[[108  12]
+ [  1  23]]
+
+              precision    recall  f1-score   support
+
+      normal       0.99      0.90      0.94       120
+      attack       0.66      0.96      0.78        24
+
+    accuracy                           0.91       144
+   macro avg       0.82      0.93      0.86       144
+weighted avg       0.94      0.91      0.92       144
+
+
+Baseline (no detection) attack catch rate: 0.000
+Model attack catch rate (recall):           0.958

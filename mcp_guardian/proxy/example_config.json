@@ -1,0 +1,13 @@
+{
+  "tools": {
+    "get_customer_order": {
+      "records_field": "order_id",
+      "bulk_values": ["ALL", "*", "all"]
+    },
+    "send_email": {
+      "is_outbound": true,
+      "recipient_field": "customer_email",
+      "trusted_domains": ["example.com"]
+    }
+  }
+}
