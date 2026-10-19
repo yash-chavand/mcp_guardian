@@ -4,17 +4,22 @@ Security Data Model — Unified SecurityEvent schema for MCP Guardian V2.
 
 import uuid
 import hashlib
+import secrets
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Any, Optional
 from .types import Decision, RiskLevel, EventType
 
 
-def hash_identifier(identifier: Optional[str], salt: str = "mcp_guardian_v2") -> str:
-    """Tokenize/hash an identifier to preserve privacy in logs/storage."""
+_PROCESS_HASH_SALT = secrets.token_bytes(32)
+
+
+def hash_identifier(identifier: Optional[str], salt: Optional[str] = None) -> str:
+    """Tokenize identifiers using a random per-process salt."""
     if not identifier:
         return "anonymous"
-    return hashlib.sha256(f"{salt}:{identifier}".encode("utf-8")).hexdigest()[:16]
+    salt_bytes = salt.encode("utf-8") if salt is not None else _PROCESS_HASH_SALT
+    return hashlib.sha256(salt_bytes + b":" + identifier.encode("utf-8")).hexdigest()[:24]
 
 
 @dataclass
@@ -56,7 +61,11 @@ class SecurityEvent:
             self.risk_level = RiskLevel.from_score(self.risk_score).value
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Keep raw identities only in memory, never in normal audit output.
+        data["session_id"] = self.tokenized_session_id
+        data["agent_id"] = self.tokenized_agent_id
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SecurityEvent":

@@ -1,130 +1,65 @@
 # MCP Guardian
 
-**Real-time anomaly detection for MCP (Model Context Protocol) servers.**
-Catches prompt injection and tool misuse against AI agents *as it happens* — not after the fact.
+An experimental Python library for applying explicit policy checks and behavioral risk scoring to MCP tool calls.
 
-100% free and open-source (MIT license). No paid APIs, no subscriptions, no
-API keys required to run the core tool. Every dependency below is free.
+## Install from this repository
 
----
+The selected distribution name is `mcp-guardian-shield`. It was not registered on PyPI when checked on 2026-10-19, and this project has not been published. Install this checkout:
 
-## What This Is
-
-An AI agent connected to tools via MCP can be tricked (via prompt injection)
-into misusing those tools — e.g., dumping an entire database instead of one
-record, or emailing sensitive data to an attacker. MCP Guardian sits between
-your agent and your real MCP server, scoring every tool call in real time
-and blocking anomalous ones before they reach your actual backend.
-
-```
-[AI Agent] ---> [MCP Guardian Proxy] ---> [Your Real MCP Server]
-                       |
-                 blocks anomalies,
-                 forwards everything else
-```
-
-**Your existing MCP server needs zero code changes.** Works regardless of
-what language it's written in (Python, Node.js, Go, anything) — Guardian
-operates purely at the HTTP/JSON-RPC layer.
-
----
-
-## Cost: $0
-
-| Component | Cost |
-|---|---|
-| MCP Guardian itself | Free (MIT license, open source) |
-| scikit-learn, FastAPI, React | Free (open-source libraries) |
-| Running it on your own machine/server | Free (your own compute) |
-
-No component of this tool requires a paid API key, cloud subscription, or
-usage-based billing. If you also want to test against a real LLM agent (a
-separate, optional part of this project), that uses Ollama — also free,
-runs locally, no API key needed.
-
----
-
-## Quickstart (2 Ways to Integrate)
-
-### Option A — Reverse Proxy (works with ANY MCP server, any language)
-
-**1. Install:**
 ```bash
-pip install -e .
+python -m pip install -e ".[dev,proxy]"
 ```
 
-**2. Describe your tools' risk signals** in a config file (`my_tools.json`):
-```json
-{
-  "tools": {
-    "your_bulk_read_tool": {
-      "records_field": "id",
-      "bulk_values": ["ALL", "*"]
-    },
-    "your_email_or_webhook_tool": {
-      "is_outbound": true,
-      "recipient_field": "to",
-      "trusted_domains": ["yourcompany.com"]
-    }
-  }
-}
-```
-(Tools you don't list still get generic default protection — this file just
-adds tuning, it's not required for every single tool.)
+`ml` is an optional extra for Isolation Forest loading. Core policy checks need only NumPy. The HTTP proxy also requires the `proxy` extra.
 
-**3. Run the proxy in front of your real server:**
-```bash
-mcp-guardian-proxy --upstream http://localhost:YOUR_SERVER_PORT --config my_tools.json --port 8000
-```
-
-**4. Point your AI agent at the proxy instead of your server directly:**
-```
-http://localhost:8000/mcp
-```
-
-**5. Watch it live:**
-```
-http://localhost:8000/guardian/dashboard
-```
-
-That's it — your real server is now protected, with zero changes to its code.
-
-### Option B — Python Decorator (if your MCP server is written in Python)
+## Protect a Python callable
 
 ```python
-from mcp_guardian import MCPGuardian
+from mcp_guardian import Guardian, GuardianConfig, ToolCallContext
 
-guardian = MCPGuardian()
-
-@mcp_app.tool()
-@guardian.protect(records_fn=lambda kwargs: 1)
-def your_tool(order_id: str, session_id: str = "default") -> dict:
-    ...  # your existing tool logic, completely unchanged
+guardian = Guardian(config=GuardianConfig(
+    allowed_tools={"lookup"},
+    denied_tools={"delete_all"},
+    max_argument_bytes=64_000,
+))
+context = ToolCallContext("lookup", {"record_id": "R-12"}, "orders", "demo")
+result = guardian.invoke(context, lambda record_id: {"id": record_id})
 ```
 
----
+An allowed call returns the original callable result. A blocked call raises `PolicyDenied` before execution. Only calls sent through the wrapper are protected; it does not intercept unrelated MCP connections.
 
-## What You Get
+For argument validation, configure `tool_schemas` with common JSON Schema fields: `type`, `required`, `properties`, `additionalProperties`, `maxLength`, `maxItems`, and `items`. This is a subset, not a full JSON Schema implementation.
 
-- **Real-time blocking** — attacks are stopped mid-session, not discovered after the fact
-- **Hybrid detection** — deterministic hard rules (e.g. "never allow >N records in one call") plus ML anomaly scoring for subtler patterns
-- **Live monitoring dashboard** (React, accessible, WCAG-conscious) — see every decision as it happens, filter by blocked/allowed, search by session
-- **Configurable sensitivity** — tune false-positive vs. false-negative trade-off to your own traffic
-- **Allow-listing** — exempt trusted internal sessions from checks entirely
-- **Full audit log** — every decision written to `guardian_decisions.jsonl` for compliance/review
+## Multiple servers and approvals
 
-## Known Limitations (see also the in-app Limitations panel)
+`GuardianConfig.server_policies` accepts per-server allow/deny rules, schemas, and approval requirements. Session/caller IDs are correlation values, not authenticated identities.
 
-- The shipped model is trained on simulated + limited real traffic — retrain on your own normal traffic before fully trusting it in production (see `mcp_guardian/train_realtime_model.py`)
-- Cold-start actions (a tool call with no prior session history) can be over-flagged
-- Session state is in-memory per proxy process — for multi-replica deployments, use sticky routing or add a shared store (not yet implemented)
-- Precision is moderate (~60-67%) — treat early blocks as "flag for review," not infallible, until calibrated on your own traffic
+Use `approval_required_tools` with `create_approval_request(context)`, then authenticate the human in the embedding app before calling `approve_request(request_id, approver_id)`. The returned token is bound to the tool, server, session and argument digest, expires, and can be used once with `invoke(..., approval_token=token)`.
 
-## Requirements
+## CLI
 
-- Python 3.9+
-- (Only if you want to rebuild the dashboard UI yourself) Node.js 18+ — not required to run the tool, since a pre-built dashboard is already included
+```bash
+mcp-guardian-shield validate-config guardian.json
+mcp-guardian-shield evaluate --config guardian.json --tool lookup --arguments '{"record_id":"R-12"}'
+mcp-guardian-shield doctor
+```
 
-## License
+Configuration files are JSON. CLI output does not include raw tool arguments.
 
-MIT — free for personal, academic, and commercial use.
+## Transports
+
+- Python callable API: tested enforcement boundary.
+- HTTP: experimental FastAPI forwarder with pre-execution checks, selected session/auth header forwarding, bounded request bodies, JSON responses and streamed non-JSON responses. MCP negotiation/session lifecycle/cancellation conformance is not established.
+- stdio: experimental JSON-RPC line bridge with ID-based response multiplexing and call gating. MCP SDK interoperability and child failure/cancellation behavior need integration testing.
+- `protect_server`: relies on private FastMCP internals and is version-sensitive.
+
+See [transport compatibility](../docs/TRANSPORT_COMPATIBILITY.md), [threat model](../docs/THREAT_MODEL.md), and [limitations](../docs/LIMITATIONS.md). Do not treat model scores as authorization or a security guarantee.
+
+## Tests and builds
+
+```bash
+python -m pytest tests -q
+python -m build
+```
+
+The suite currently covers the Python API, deterministic rules, approvals, redaction and regressions. It does not yet establish MCP transport conformance or production security. See [implementation audit](../docs/IMPLEMENTATION_AUDIT.md).

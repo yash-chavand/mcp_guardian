@@ -1,5 +1,3 @@
-
-@'
 # Python virtual environments
 venv/
 .venv/
@@ -14,6 +12,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 
 # Generated data and local databases
 data/*.jsonl
@@ -31,4 +31,3 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
-'@ | Set-Content -Encoding utf8 .gitignore

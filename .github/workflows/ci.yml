@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project and verification tools
+        run: python -m pip install -e ".[dev,proxy,ml]" pip-audit ruff
+      - name: Compile Python sources
+        run: python -m compileall -q mcp_guardian
+      - name: Lint changed library and tests
+        run: >-
+          ruff check mcp_guardian/cli.py mcp_guardian/core/config.py
+          mcp_guardian/core/types.py mcp_guardian/exceptions.py
+          mcp_guardian/ml/isolation_forest.py mcp_guardian/proxy/stdio_proxy.py
+          mcp_guardian/proxy/stdio_cli.py tests/test_public_api.py
+          benchmarks/measure_overhead.py
+      - name: Run tests
+        env:
+          RUN_MCP_INTEGRATION: "1"
+        run: python -m pytest tests -q
+      - name: Build distributions
+        run: python -m build
+      - name: Audit installed dependencies
+        run: pip-audit
+
+  mcp-stdio-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install stdio interoperability dependencies
+        run: python -m pip install -e ".[proxy,interop]" pytest
+      - name: Verify stdio bridge with official MCP SDK client and server
+        env:
+          RUN_MCP_INTEGRATION: "1"
+        run: python -m pytest tests/test_mcp_stdio_integration.py -q

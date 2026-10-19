@@ -5,13 +5,12 @@ Reads the raw request-level traffic log, groups requests into sessions,
 and converts each session into a numeric feature vector the ML model
 can learn from.
 
-Ground-truth attack labels are inferred here ONLY for evaluation purposes
-(we know which generator produced which session because we control the
-simulator) -- the anomaly model itself never sees these labels during
-training, since Isolation Forest is unsupervised.
+Ground-truth attack labels are joined from a separate simulator manifest.
+Feature construction does not infer or alter the ground-truth labels.
 """
 
 import json
+import argparse
 import pandas as pd
 from pathlib import Path
 
@@ -19,9 +18,9 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 LOG_PATH = DATA_DIR / "traffic_log.jsonl"
 
 
-def load_raw_log():
+def load_raw_log(log_path=LOG_PATH):
     records = []
-    with open(LOG_PATH) as f:
+    with open(log_path, encoding="utf-8") as f:
         for line in f:
             records.append(json.loads(line))
     return records
@@ -54,7 +53,7 @@ def session_features(records):
         # email legitimacy feature
         email_rows = grp[grp["tool"] == "send_email"]
         if len(email_rows) > 0:
-            recipient_mismatch_rate = 1 - email_rows["recipient_matches_last_lookup"].fillna(False).mean()
+            recipient_mismatch_rate = 1 - email_rows["recipient_matches_last_lookup"].astype("boolean").fillna(False).mean()
         else:
             recipient_mismatch_rate = 0
 
@@ -72,36 +71,46 @@ def session_features(records):
     return pd.DataFrame(rows)
 
 
-def label_sessions(records, feature_df):
+def label_sessions(feature_df, labels_path):
     """
-    Infer ground-truth label per session using simple, transparent rules that
-    match exactly how the simulator generated attacks (used ONLY for evaluation,
-    never fed to the unsupervised model as a training signal).
+    Join simulator-assigned ground truth by session ID, independently of features.
     """
-    labels = []
-    for _, row in feature_df.iterrows():
-        is_attack = (
-            row["max_records_requested"] > 1                      # bulk exfiltration
-            or row["recipient_mismatch_rate"] > 0                 # redirected email
-            or (row["min_time_between_calls"] != -1 and row["min_time_between_calls"] < 0.1)  # rapid-fire bot
-            or row["n_lookup_calls"] >= 5                          # reconnaissance / bulk pattern
+    labels = pd.read_csv(labels_path)
+    required = {"session_id", "scenario", "label"}
+    if not required.issubset(labels.columns):
+        raise ValueError(f"Ground-truth file must contain columns: {sorted(required)}")
+    if labels["session_id"].duplicated().any():
+        raise ValueError("Ground-truth file contains duplicate session IDs")
+    if not set(labels["label"].unique()).issubset({0, 1}):
+        raise ValueError("Ground-truth labels must be binary 0/1")
+    observed = set(feature_df["session_id"])
+    expected = set(labels["session_id"])
+    if observed != expected:
+        raise ValueError(
+            f"Traffic and ground-truth sessions differ: "
+            f"{len(observed - expected)} unlabeled, {len(expected - observed)} without traffic"
         )
-        labels.append(1 if is_attack else 0)
-    feature_df = feature_df.copy()
-    feature_df["label"] = labels
-    return feature_df
+    return feature_df.merge(labels, on="session_id", how="left", validate="one_to_one")
 
 
-def build_and_save():
-    records = load_raw_log()
+def build_and_save(log_path=LOG_PATH, labels_path=None, output_path=None):
+    log_path = Path(log_path)
+    labels_path = Path(labels_path) if labels_path else log_path.with_name("session_labels.csv")
+    output_path = Path(output_path) if output_path else log_path.with_name("session_features.csv")
+    records = load_raw_log(log_path)
     feat_df = session_features(records)
-    feat_df = label_sessions(records, feat_df)
-    out_path = DATA_DIR / "session_features.csv"
-    feat_df.to_csv(out_path, index=False)
-    print(f"Built {len(feat_df)} session feature rows -> {out_path}")
+    feat_df = label_sessions(feat_df, labels_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    feat_df.to_csv(output_path, index=False)
+    print(f"Built {len(feat_df)} session feature rows -> {output_path}")
     print(feat_df["label"].value_counts().rename({0: "normal", 1: "attack"}))
     return feat_df
 
 
 if __name__ == "__main__":
-    build_and_save()
+    parser = argparse.ArgumentParser(description="Build per-session features and join independent labels")
+    parser.add_argument("--log", default=str(LOG_PATH), help="Raw traffic JSONL path")
+    parser.add_argument("--labels", default=None, help="Independent session label CSV (defaults beside log)")
+    parser.add_argument("--output", default=None, help="Feature CSV output path (defaults beside log)")
+    args = parser.parse_args()
+    build_and_save(args.log, args.labels, args.output)

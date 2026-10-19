@@ -25,14 +25,9 @@ mcp-security-project/
 ## How to Run It Yourself
 
 ```bash
-# 1. Generate simulated traffic (400 normal sessions, 80 attack sessions)
-python3 server/traffic_simulator.py
-
-# 2. Build ML features from the raw traffic log
-python3 model/build_features.py
-
-# 3. Train the anomaly detector and evaluate it
-python3 model/train_and_evaluate.py
+# Reproduce the synthetic benchmark over 30 generated datasets/seeds.
+# Outputs are isolated from the legacy figures/reports under results/.
+python model/research_experiment.py --runs 30 --seed-start 20261019 --output-dir artifacts/paper_reproduction
 ```
 
 ## What Each Attack Type Simulates
@@ -44,18 +39,16 @@ python3 model/train_and_evaluate.py
 | `rapid_fire` | A scripted bot hammering the lookup tool at inhuman speed (no natural pauses) |
 | `reconnaissance` | Sequential order-ID guessing/probing to discover valid records |
 
-## Actual Results From This Run
+## Research results status
 
-- **Precision:** 0.595
-- **Recall (attack detection rate):** 0.917
-- **F1-score:** 0.721
-- **ROC-AUC:** 0.976
-- **Baseline (no detection system):** 0.00 — every attack succeeds silently
-- **Your model:** catches 91.7% of attacks vs 0% for the undefended baseline
-
-These are the numbers to report in your paper's Results/Evaluation section.
-The confusion matrix and bar chart in `results/` are ready to paste directly
-into your paper or presentation slides.
+The metrics and plots already committed under `results/` are legacy outputs
+and are **withdrawn from research use**. The former feature builder derived
+ground-truth labels from the same engineered features used by the classifiers,
+creating circular evaluation. The current generator writes a separate
+session-label manifest, and `model/research_experiment.py` runs repeated
+synthetic trials against explicit-rule, supervised, unsupervised, and allow-all
+baselines. Do not cite the legacy metrics. New synthetic results still do not
+establish performance on real MCP deployments or AI agents.
 
 ## How This Maps to Your Paper
 
@@ -64,47 +57,44 @@ into your paper or presentation slides.
   `avg_time_between_calls`, `recipient_mismatch_rate`, etc.)
 - **Section: Methodology** → Isolation Forest, trained only on normal-labeled
   training data (unsupervised anomaly detection), contamination rate = 0.10
-- **Section: Experimental Setup** → 480 total sessions (400 normal / 80 attack),
-  70/30 train-test split, stratified
-- **Section: Results** → the precision/recall/F1/ROC-AUC table above, plus both
-  saved plots
-- **Section: Limitations (be upfront about this)** → traffic is simulated, not
-  from a real production MCP deployment; ground-truth labels are derived from
-  simulator rules rather than human-verified real-world incidents; future work
-  should validate against real or honeypot-collected MCP traffic
+- **Experimental Setup** → report independent generated data seeds, scenario
+  mix, stratified split, model settings, environment, and input hashes from
+  each run manifest
+- **Results** → use repeated-run summaries and per-run CSV output; include
+  uncertainty and false-positive rates
+- **Limitations** → traffic remains synthetic, attack patterns are narrow, and
+  evaluation against independently authored real-agent traffic is still needed
 
-## Part 2: Real AI Agent + Real MCP Protocol (New)
+## Part 2: MCP SDK and Ollama Example
 
-The `real_mcp/` folder contains a **genuine** MCP server (built with
-Anthropic's official `mcp` SDK, real protocol, verified working) and a
-**genuine** LLM-driven agent (via Ollama) that actually decides which
-tools to call — not scripted. This lets you test real prompt injection
-against a real model and observe real outcomes, then validate that your
-anomaly detector (trained on the simulated data above) still catches the
-resulting attack traffic.
+The `real_mcp/` folder contains an example MCP server and an Ollama-backed
+agent intended for exploratory testing. This path is separate from Guardian's
+agent-client integration path and was not independently verified in the
+current validation pass. Do not treat it as protocol-conformance evidence.
+Record client, model, prompt, server, and SDK versions before interpreting
+any results.
 
 See `real_mcp/SETUP_GUIDE.md` for full setup instructions (requires
 installing Ollama on your own machine — this component needs local LLM
 inference that cannot run in a sandboxed environment).
 
 ```
-mcp-security-project/
-├── real_mcp/
-│   ├── real_mcp_server.py       # Real, protocol-compliant MCP server
-│   ├── agent.py                 # Real LLM agent (Ollama-driven tool calling)
-│   ├── attack_prompts.py        # Real prompt-injection attack messages
-│   ├── run_real_attack_demo.py  # Runs attacks through the real agent
-│   ├── evaluate_real_traffic.py # Scores real traffic with your trained model
-│   └── SETUP_GUIDE.md           # Full setup instructions
+real_mcp/
+├── real_mcp_server.py       # MCP SDK server example
+├── agent.py                 # Ollama-backed agent example
+├── attack_prompts.py        # Exploratory prompt-injection cases
+├── run_real_attack_demo.py  # Example agent run
+├── evaluate_real_traffic.py # Scores example traffic
+└── SETUP_GUIDE.md           # Local setup instructions
 ```
 
 ## Part 3: MCP Guardian — The Deployable Extension (New)
 
-The `mcp_guardian/` folder is the actual **productized tool**: a real-time,
-per-request anomaly detector any MCP server can be protected with — either
-via a Python decorator (if your server is Python) or a language-agnostic
-**reverse proxy** (works with any MCP server, any language, zero code
-changes to it).
+The `mcp_guardian/` folder contains an experimental security gateway with a
+Python callable wrapper and HTTP/stdio proxy prototypes. The proxy protocol
+behavior is not fully verified, and the Python wrapper protects only calls
+that pass through it. See [`docs/TRANSPORT_COMPATIBILITY.md`](docs/TRANSPORT_COMPATIBILITY.md)
+and [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) before use.
 
 **100% free, MIT licensed.** No paid APIs required to run it.
 
@@ -118,7 +108,7 @@ mcp_guardian/
 ├── README.md                   # Full quickstart + integration guide
 └── proxy/
     ├── proxy_server.py         # Language-agnostic reverse proxy (FastAPI)
-    ├── cli.py                  # `mcp-guardian-proxy` installed CLI command
+    ├── cli.py                  # `mcp-guardian-shield-proxy` installed CLI command
     ├── risk_profiles.py        # Generic, configurable per-tool risk signals
     ├── example_config.json     # Example risk profile config
     ├── fake_upstream_server.py # Test double for verifying the proxy
@@ -128,33 +118,34 @@ mcp_guardian/
 
 **Install and run:**
 ```bash
-pip install -e .
-mcp-guardian-proxy --upstream http://localhost:YOUR_PORT --config mcp_guardian/proxy/example_config.json --port 8000
+python -m pip install -e ".[proxy,ml]"
+mcp-guardian-shield-proxy --upstream http://localhost:YOUR_PORT --config mcp_guardian/proxy/example_config.json --guardian-config examples/agent_configs/guardian-policy.json --port 8000
 ```
 Then point your AI agent at `http://localhost:8000/mcp` instead of your real
 server directly, and view live traffic at `http://localhost:8000/guardian/dashboard`.
 
-**Automated tests** (`tests/test_guardian.py`, 10/10 passing) verify: normal
-traffic passes, bulk/rapid-fire/redirected-email attacks are blocked, the
-decorator genuinely prevents the wrapped function from executing when
-blocked, sensitivity tuning shifts the decision boundary correctly, and
-allow-listing works.
+The repository originally reported 10/10 tests for its prototype. The current
+checkout has an expanded suite; see `docs/IMPLEMENTATION_AUDIT.md` for the
+latest executed results. Those tests do not establish complete MCP protocol
+compatibility or production security.
 
-**Verified metrics after calibration fixes** (real-time, per-request model):
-precision 0.832, recall 0.917, F1 0.872 — improved from an initial
-precision of 0.673 after discovering and fixing an Isolation Forest
-contamination-parameter miscalibration that was causing ~35% false
-positives on the most common normal traffic pattern.
+Previously reported synthetic metrics are retired because of the circular
+labeling issue described above. New results must come from independent
+simulator labels and the repeated-run experiment.
 
-## Next Steps to Strengthen the Paper
+## Developer quickstart
 
-1. **Tune the model:** try Random Forest (supervised) as a second model and
-   compare — since you do have labels here, a supervised baseline is a fair
-   comparison point against the unsupervised Isolation Forest.
-2. **Add a real LLM case study:** run 5-10 real prompt-injection attempts
-   through an actual LLM (e.g., via the Anthropic API) connected to a real
-   MCP server, and show your detector catching the resulting abnormal traffic
-   — this strengthens real-world credibility alongside the simulated bulk results.
-3. **False-positive analysis:** manually inspect the 15 false positives (normal
-   sessions wrongly flagged) to explain *why* they were flagged — useful
-   discussion material for your paper.
+See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the Python SDK, JSON
+configuration, approval flow, and CLI examples. The selected distribution
+name is `mcp-guardian-shield`; it was not registered on PyPI when checked on
+2026-10-19, but this project has not been published. See
+[`docs/AGENT_TESTING.md`](docs/AGENT_TESTING.md) for setup flows and config
+examples for Claude Desktop/Code, Cursor, and VS Code/Copilot.
+
+## Paper-readiness checklist
+
+The reproducibility harness improves the synthetic study, but a defensible
+security paper still needs an independently authored test set, realistic benign
+agent workflows, adaptive/evasion cases, cross-agent integration runs, an
+ablation study, and repeated false-positive analysis. The current synthetic
+benchmark alone is not sufficient evidence for broad security claims.

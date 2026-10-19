@@ -114,6 +114,10 @@ def test_cumulative_records_sliding_window_blocks_chunked_exfiltration():
     for i in range(5):
         res = g.check(session_id, "get_customer_order", records_this_call=5)
         assert res["blocked"] is False, f"Call {i+1} should be allowed"
+        # The default per-session rapid-call rule is independent of the quota.
+        # Space requests beyond that configured threshold to exercise the
+        # cumulative-record boundary specifically.
+        time.sleep(config.hard_block_rapid_seconds + 0.01)
 
     # Call 6: pushes cumulative window to 30 records -> MUST be blocked
     res_blocked = g.check(session_id, "get_customer_order", records_this_call=5)
@@ -139,6 +143,9 @@ def test_sliding_window_rate_blocks_sustained_frequency():
     for i in range(20):
         res = g.check(session_id, "lookup", records_this_call=1)
         assert res["blocked"] is False
+        # The test exercises the 60-second call quota, not the independent
+        # per-call rapid-fire rule.
+        time.sleep(config.hard_block_rapid_seconds + 0.01)
 
     # 21st call exceeds 20 calls/minute limit
     res_blocked = g.check(session_id, "lookup", records_this_call=1)

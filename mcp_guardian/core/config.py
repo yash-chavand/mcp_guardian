@@ -4,7 +4,8 @@ Configuration system for MCP Guardian V2.
 
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Set, Dict
+from typing import Set, Dict, Any
+import json
 
 
 @dataclass
@@ -95,6 +96,73 @@ class GuardianV2Config:
     log_path: Path = field(default_factory=lambda: _get_default_data_dir() / "guardian_decisions.jsonl")
     enable_sqlite: bool = True
     async_graph_processing: bool = True
+
+    # Policy controls used by the reusable SDK API. Empty allow-list means
+    # unrestricted unless default_deny is enabled.
+    allowed_tools: Set[str] = field(default_factory=set)
+    denied_tools: Set[str] = field(default_factory=set)
+    default_deny: bool = False
+    tool_schemas: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    server_policies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    max_argument_bytes: int = 1_048_576
+    max_argument_depth: int = 32
+    policy_version: str = "1"
+    approval_required_tools: Set[str] = field(default_factory=set)
+    approval_ttl_seconds: float = 300.0
+    trusted_caller_ids: Set[str] = field(default_factory=set)
+
+    def __post_init__(self):
+        if not 0 <= self.monitor_threshold <= 1 or not 0 <= self.block_threshold <= 1:
+            raise ValueError("monitor_threshold and block_threshold must be between 0 and 1")
+        if self.monitor_threshold > self.block_threshold or self.sensitivity <= 0:
+            raise ValueError("monitor_threshold must not exceed block_threshold and sensitivity must be positive")
+        if self.max_argument_bytes <= 0 or self.max_argument_depth <= 0:
+            raise ValueError("argument limits must be positive")
+        if self.approval_ttl_seconds <= 0:
+            raise ValueError("approval_ttl_seconds must be positive")
+        if self.hard_block_bulk_threshold < 0 or self.max_calls_per_window <= 0:
+            raise ValueError("bulk and call limits must be non-negative/positive")
+        if self.max_history_per_session <= 0 or self.max_records_per_window < 0:
+            raise ValueError("session history and record quotas are invalid")
+        weights = [getattr(self.weights, field) for field in self.weights.__dataclass_fields__]
+        if any(weight < 0 for weight in weights) or sum(weights) <= 0:
+            raise ValueError("risk weights must be non-negative with a positive total")
+        if not isinstance(self.server_policies, dict) or not all(isinstance(p, dict) for p in self.server_policies.values()):
+            raise ValueError("server_policies must map server names to objects")
+        for name in ("allowed_tools", "denied_tools", "approval_required_tools", "allow_list_sessions", "trusted_domains", "trusted_caller_ids"):
+            value = getattr(self, name)
+            if not isinstance(value, (set, frozenset, list, tuple)) or not all(isinstance(v, str) and v for v in value):
+                raise ValueError(f"{name} must contain non-empty strings")
+            setattr(self, name, set(value))
+        for server_id, policy in self.server_policies.items():
+            for name in ("allowed_tools", "denied_tools", "approval_required_tools"):
+                if name in policy:
+                    value = policy[name]
+                    if not isinstance(value, (set, frozenset, list, tuple)) or not all(isinstance(v, str) and v for v in value):
+                        raise ValueError(f"server_policies[{server_id!r}].{name} must contain non-empty strings")
+            if "default_deny" in policy and not isinstance(policy["default_deny"], bool):
+                raise ValueError(f"server_policies[{server_id!r}].default_deny must be boolean")
+
+    @classmethod
+    def from_file(cls, path: str) -> "GuardianV2Config":
+        """Load a JSON configuration file without executing configuration code."""
+        try:
+            with open(path, "r", encoding="utf-8") as config_file:
+                value = json.load(config_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Could not load Guardian JSON configuration: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("Guardian configuration root must be a JSON object")
+        allowed = set(cls.__dataclass_fields__)
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(f"Unknown Guardian configuration fields: {', '.join(sorted(unknown))}")
+        if "weights" in value and isinstance(value["weights"], dict):
+            value["weights"] = RiskWeights(**value["weights"])
+        for key in ("allowed_tools", "denied_tools", "allow_list_sessions", "trusted_domains", "approval_required_tools", "trusted_caller_ids"):
+            if key in value and isinstance(value[key], list):
+                value[key] = set(value[key])
+        return cls(**value)
 
 
 def _get_default_data_dir() -> Path:

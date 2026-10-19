@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "guardian-shield-test": {
+      "command": "C:/absolute/path/to/project/.venv/Scripts/mcp-guardian-shield-stdio.exe",
+      "args": [
+        "--guardian-config",
+        "C:/absolute/path/to/project/examples/agent_configs/guardian-policy.json",
+        "--pass-env",
+        "MCP_GUARDIAN_TRACE_PATH",
+        "--",
+        "C:/absolute/path/to/project/.venv/Scripts/python.exe",
+        "C:/absolute/path/to/project/examples/mcp_sdk_fixture_server.py"
+      ],
+      "env": {
+        "MCP_GUARDIAN_TRACE_PATH": "C:/absolute/path/to/project/.guardian_fixture_calls.jsonl"
+      }
+    }
+  }
+}

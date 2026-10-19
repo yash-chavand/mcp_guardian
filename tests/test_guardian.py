@@ -16,7 +16,7 @@ from mcp_guardian.guardian import GuardianConfig
 
 @pytest.fixture
 def guardian():
-    return MCPGuardian(verbose=False, log_path="/tmp/test_guardian_decisions.jsonl")
+    return MCPGuardian(verbose=False, log_path=None)
 
 
 def test_normal_single_lookup_is_allowed(guardian):
@@ -31,8 +31,11 @@ def test_bulk_request_is_blocked_by_hard_rule(guardian):
 
 
 def test_rapid_fire_is_blocked(guardian):
+    from mcp_guardian import GuardianConfig
+    guardian = MCPGuardian(verbose=False, log_path=None,
+                           config=GuardianConfig(hard_block_rapid_seconds=1.0))
     guardian.check("session-c", "get_customer_order", records_this_call=1)
-    time.sleep(0.01)  # far faster than the 0.05s hard-rule threshold
+    time.sleep(0.01)  # far faster than the explicitly configured 1s threshold
     result = guardian.check("session-c", "get_customer_order", records_this_call=1)
     assert result["blocked"] is True
 
@@ -52,7 +55,7 @@ def test_recipient_mismatch_is_flagged(guardian):
 
 
 def test_allow_listed_session_bypasses_all_checks():
-    g = MCPGuardian(verbose=False, log_path="/tmp/test_guardian_decisions.jsonl",
+    g = MCPGuardian(verbose=False, log_path=None,
                      config=GuardianConfig(allow_list_sessions={"trusted-session"}))
     result = g.check("trusted-session", "get_customer_order", records_this_call=99999)
     assert result["blocked"] is False
@@ -64,9 +67,9 @@ def test_sensitivity_affects_blocking_decision_at_the_boundary():
     call should be allowed when loose, blocked when strict."""
     borderline_kwargs = dict(records_this_call=1, recipient_mismatch=False, is_email=False)
 
-    g_loose = MCPGuardian(verbose=False, log_path="/tmp/test_guardian_decisions.jsonl",
+    g_loose = MCPGuardian(verbose=False, log_path=None,
                            config=GuardianConfig(sensitivity=0.05))
-    g_strict = MCPGuardian(verbose=False, log_path="/tmp/test_guardian_decisions.jsonl",
+    g_strict = MCPGuardian(verbose=False, log_path=None,
                             config=GuardianConfig(sensitivity=20.0))
 
     r_loose = g_loose.check("s1", "get_customer_order", **borderline_kwargs)
@@ -79,7 +82,7 @@ def test_sensitivity_affects_blocking_decision_at_the_boundary():
 
 
 def test_decorator_blocks_and_prevents_real_function_execution():
-    g = MCPGuardian(verbose=False, log_path="/tmp/test_guardian_decisions.jsonl")
+    g = MCPGuardian(verbose=False, log_path=None)
     call_log = []
 
     @g.protect(records_fn=lambda kwargs: 500)
@@ -92,8 +95,22 @@ def test_decorator_blocks_and_prevents_real_function_execution():
     assert call_log == []  # proves the real tool logic never ran
 
 
+def test_decorator_checks_positional_arguments_before_execution():
+    g = MCPGuardian(verbose=False, log_path=None)
+    call_log = []
+
+    @g.protect()
+    def bulk_tool(records: int):
+        call_log.append(records)
+        return {"records": records}
+
+    result = bulk_tool(500)
+    assert result["status"] == "blocked_by_guardian"
+    assert call_log == []
+
+
 def test_decorator_allows_and_executes_real_function():
-    g = MCPGuardian(verbose=False, log_path="/tmp/test_guardian_decisions.jsonl")
+    g = MCPGuardian(verbose=False, log_path=None)
     call_log = []
 
     @g.protect(records_fn=lambda kwargs: 1)

@@ -1,0 +1,34 @@
+{
+  "seed": 20261037,
+  "python": "3.12.4 | packaged by Anaconda, Inc. | (main, Jun 18 2024, 15:03:56) [MSC v.1929 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "numpy": "1.26.4",
+  "pandas": "2.2.3",
+  "scikit_learn": "1.6.0",
+  "split": {
+    "strategy": "stratified session split",
+    "test_size": 0.3,
+    "random_state": 20261037
+  },
+  "features": [
+    "n_calls",
+    "n_lookup_calls",
+    "n_email_calls",
+    "max_records_requested",
+    "avg_time_between_calls",
+    "min_time_between_calls",
+    "recipient_mismatch_rate"
+  ],
+  "isolation_forest": {
+    "n_estimators": 200,
+    "contamination": 0.1,
+    "random_state": 20261037
+  },
+  "input_sha256": {
+    "traffic_log.jsonl": "0543e3569b90f0cfb3054b352f956009defba91f9d94f5d1f5ad0c33c9ddefce",
+    "session_labels.csv": "ec677b8c253e7989d18991217def037db7599637fb48d078d9867322ced6881a"
+  },
+  "feature_table_sha256": "de0e662b31ba3ed4406428bb49766b3a3d9024e1c832611f713f201e6c1e5299",
+  "isolation_forest_sha256": "cfec68d930c942baba7f503d59b28168710aa7a895e8a8c6896d9b562c56f40d",
+  "label_source": "independent simulator session manifest; labels were not derived from features"
+}

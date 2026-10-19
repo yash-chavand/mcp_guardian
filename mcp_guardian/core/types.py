@@ -3,6 +3,9 @@ Core types and enumerations for MCP Guardian V2.
 """
 
 from enum import Enum
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 
 class Decision(str, Enum):
@@ -38,3 +41,45 @@ class EventType(str, Enum):
     RATE_ABUSE = "rate_abuse"
     UNKNOWN_DESTINATION = "unknown_destination"
     SEQUENCE_ANOMALY = "sequence_anomaly"
+
+
+@dataclass(frozen=True)
+class ToolCallContext:
+    """Request context for one protected tool invocation."""
+    tool_name: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    server_id: str = "primary-server"
+    session_id: str = "default"
+    caller_id: Optional[str] = None
+    schema: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class SecurityDecision:
+    """Stable, explainable result of evaluating a tool call."""
+    decision_id: str
+    outcome: Decision
+    tool_name: str
+    server_id: str
+    session_id: str
+    risk_score: float
+    reason: str
+    matched_rules: List[str] = field(default_factory=list)
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    policy_version: str = "1"
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    latency_ms: float = 0.0
+
+    @property
+    def allowed(self) -> bool:
+        return self.outcome in (Decision.ALLOW, Decision.MONITOR)
+
+
+@dataclass(frozen=True)
+class ApprovalRequest:
+    request_id: str
+    tool_name: str
+    server_id: str
+    session_id: str
+    expires_at: str
+    status: str = "pending"

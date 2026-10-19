@@ -17,14 +17,22 @@ Maintains 100% backward compatibility with MCP Guardian V1 APIs and decorators.
 """
 
 import time
+import logging
 import json
+import uuid
+import inspect
+import threading
+import secrets
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from functools import wraps
 from collections import defaultdict
 from typing import Dict, List, Any, Optional, Set, Tuple
 
-from .core.types import Decision, RiskLevel, EventType
-from .core.events import SecurityEvent, RiskReason
+from .core.types import Decision, RiskLevel, EventType, SecurityDecision, ToolCallContext, ApprovalRequest
+from .exceptions import PolicyDenied, ApprovalRequired
+from .core.events import SecurityEvent, RiskReason, hash_identifier
 from .core.config import GuardianV2Config, RiskWeights
 from .rules.rule_engine import RuleEngine
 from .ml.isolation_forest import IsolationForestScorer
@@ -50,19 +58,90 @@ DEFAULT_MODEL_PATH = Path(__file__).parent / "realtime_model.joblib"
 DEFAULT_LOG_PATH = Path(__file__).parent.parent / "data" / "guardian_decisions.jsonl"
 
 
+def _synchronized(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+def _json_depth(value: Any, depth: int = 0) -> int:
+    if isinstance(value, dict):
+        return max([depth + 1] + [_json_depth(v, depth + 1) for v in value.values()])
+    if isinstance(value, (list, tuple)):
+        return max([depth + 1] + [_json_depth(v, depth + 1) for v in value])
+    return depth
+
+
+def _arguments_digest(arguments: Dict[str, Any]) -> str:
+    payload = json.dumps(arguments, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_basic_schema(value: Any, schema: Dict[str, Any]) -> Optional[str]:
+    """Small fail-closed subset of JSON Schema for common MCP argument shapes."""
+    if not isinstance(schema, dict):
+        return "schema_not_object"
+    expected = schema.get("type")
+    types = {"object": dict, "array": list, "string": str, "integer": int,
+             "number": (int, float), "boolean": bool, "null": type(None)}
+    if expected:
+        choices = expected if isinstance(expected, list) else [expected]
+        if not any(t in types and isinstance(value, types[t]) and not
+                   (t in {"integer", "number"} and isinstance(value, bool)) and
+                   not (t == "integer" and isinstance(value, float) and not value.is_integer())
+                   for t in choices):
+            return "type_mismatch"
+    if isinstance(value, dict):
+        for key in schema.get("required", []):
+            if key not in value:
+                return f"missing_required:{key}"
+        props = schema.get("properties", {})
+        if schema.get("additionalProperties") is False and any(k not in props for k in value):
+            return "unexpected_property"
+        for key, child in value.items():
+            if key in props:
+                issue = _validate_basic_schema(child, props[key])
+                if issue:
+                    return f"{key}:{issue}"
+    if isinstance(value, str) and len(value) > schema.get("maxLength", float("inf")):
+        return "max_length_exceeded"
+    if isinstance(value, list):
+        if len(value) > schema.get("maxItems", float("inf")):
+            return "max_items_exceeded"
+        if "items" in schema:
+            for index, child in enumerate(value):
+                issue = _validate_basic_schema(child, schema["items"])
+                if issue:
+                    return f"item_{index}:{issue}"
+    return None
+
+
 class MCPGuardian:
     """Production-grade adaptive security gateway for MCP tool traffic."""
+
+    @classmethod
+    def from_config(cls, path: str, **kwargs) -> "MCPGuardian":
+        """Create a guardian from a validated JSON config file."""
+        try:
+            config = GuardianV2Config.from_file(path)
+        except (OSError, ValueError, TypeError) as exc:
+            from .exceptions import ConfigurationError
+            raise ConfigurationError(str(exc)) from exc
+        return cls(config=config, **kwargs)
 
     def __init__(
         self,
         model_path: Path = DEFAULT_MODEL_PATH,
-        log_path: Path = DEFAULT_LOG_PATH,
+        log_path: Optional[Path] = DEFAULT_LOG_PATH,
         verbose: bool = True,
         config: GuardianV2Config = None
     ):
         self.config = config or GuardianV2Config()
         self.verbose = verbose
-        self.log_path = Path(log_path)
+        self.log_path = Path(log_path) if log_path is not None else None
 
         # Persistence & Storage
         self.storage = SecurityStorage(
@@ -100,6 +179,211 @@ class MCPGuardian:
         self._session_activity: Dict[str, float] = {}
         self._check_counter: int = 0
         self._decision_log: List[Dict[str, Any]] = []
+        self._state_lock = threading.RLock()
+        self._approval_requests: Dict[str, Dict[str, Any]] = {}
+        self._approval_tokens: Dict[str, str] = {}
+
+    def evaluate(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None,
+                 session_id: str = "default", server_id: str = "primary-server",
+                 caller_id: Optional[str] = None, schema: Optional[Dict[str, Any]] = None,
+                 records_this_call: int = 1, recipient_mismatch: bool = False,
+                 is_email: bool = False, prompt_text: Optional[str] = None,
+                 approval_token: Optional[str] = None) -> SecurityDecision:
+        """Evaluate a call under static authorization, argument limits and risk signals."""
+        started = time.perf_counter()
+        context = ToolCallContext(tool_name, arguments or {}, server_id, session_id, caller_id, schema)
+        violations = self._policy_violations(context)
+        if violations:
+            latency = round((time.perf_counter() - started) * 1000, 2)
+            decision_id = str(uuid.uuid4())
+            self.storage.save_event(SecurityEvent(
+                event_id=decision_id, timestamp=datetime.now(timezone.utc).isoformat(),
+                session_id=session_id, server_id=server_id, tool_name=tool_name,
+                decision=Decision.BLOCK.value, risk_score=1.0, risk_level=RiskLevel.CRITICAL.value,
+                reasons=[{"type": code, "severity": "critical", "message": code} for code in violations],
+                evidence={"policy_version": self.config.policy_version}, latency_ms=latency,
+            ))
+            return SecurityDecision(
+                decision_id=decision_id, outcome=Decision.BLOCK,
+                tool_name=tool_name, server_id=server_id, session_id=session_id,
+                risk_score=1.0, reason=violations[0], matched_rules=violations,
+                policy_version=self.config.policy_version,
+                latency_ms=latency,
+            )
+        policy = self.config.server_policies.get(server_id, {})
+        approval_tools = set(self.config.approval_required_tools) | set(policy.get("approval_required_tools", ()))
+        if tool_name in approval_tools and not self._approval_matches(context, approval_token):
+            latency = round((time.perf_counter() - started) * 1000, 2)
+            return SecurityDecision(
+                decision_id=str(uuid.uuid4()), outcome=Decision.CHALLENGE,
+                tool_name=tool_name, server_id=server_id, session_id=session_id,
+                risk_score=1.0, reason="human_approval_required",
+                matched_rules=["human_approval_required"],
+                policy_version=self.config.policy_version, latency_ms=latency,
+            )
+        # Session tokens supplied by an MCP peer are untrusted correlation IDs.
+        # Only an embedding app that has verified its caller may activate a
+        # session allow-list bypass through this API.
+        risk_session_id = session_id
+        if session_id in self.config.allow_list_sessions and caller_id not in self.config.trusted_caller_ids:
+            risk_session_id = f"unverified:{session_id}"
+        decision = self.check(session_id=risk_session_id, server_id=server_id,
+                              tool_name=tool_name, arguments=context.arguments,
+                              records_this_call=records_this_call,
+                              recipient_mismatch=recipient_mismatch,
+                              is_email=is_email, prompt_text=prompt_text)
+        outcome = Decision(decision.get("decision", Decision.ALLOW.value))
+        return SecurityDecision(
+            decision_id=str(decision.get("event_id") or uuid.uuid4()), outcome=outcome,
+            tool_name=tool_name, server_id=server_id, session_id=session_id,
+            risk_score=float(decision.get("risk_score", decision.get("anomaly_score", 0.0))),
+            reason=str(decision.get("reason", "normal")),
+            matched_rules=[r.get("type", "") for r in decision.get("reasons", []) if r.get("type")],
+            evidence={"correlation_id": decision.get("correlation_id")},
+            policy_version=self.config.policy_version,
+            latency_ms=float(decision.get("latency_ms", (time.perf_counter() - started) * 1000)),
+        )
+
+    def _policy_violations(self, context: ToolCallContext) -> List[str]:
+        if not isinstance(context.arguments, dict):
+            return ["arguments_must_be_object"]
+        policy = self.config.server_policies.get(context.server_id, {})
+        global_allow = set(self.config.allowed_tools)
+        server_allow = set(policy.get("allowed_tools", ()))
+        allow = global_allow & server_allow if global_allow and server_allow else global_allow or server_allow
+        deny = set(self.config.denied_tools) | set(policy.get("denied_tools", ()))
+        if context.tool_name in deny:
+            return ["tool_denied_by_policy"]
+        if allow and context.tool_name not in allow:
+            return ["tool_not_in_allow_list"]
+        if (policy.get("default_deny", False) or self.config.default_deny) and not allow:
+            return ["default_deny_requires_tool_allow_list"]
+        try:
+            encoded = json.dumps(context.arguments, allow_nan=False, ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            return ["arguments_not_json_serializable"]
+        if len(encoded) > self.config.max_argument_bytes:
+            return ["arguments_exceed_size_limit"]
+        if _json_depth(context.arguments) > self.config.max_argument_depth:
+            return ["arguments_exceed_nesting_limit"]
+        schemas = [schema for schema in (
+            self.config.tool_schemas.get(context.tool_name),
+            policy.get("tool_schemas", {}).get(context.tool_name),
+            context.schema,
+        ) if schema]
+        for schema in schemas:
+            error = _validate_basic_schema(context.arguments, schema)
+            if error:
+                return [f"arguments_schema_invalid:{error}"]
+        return []
+
+    def create_approval_request(self, context: ToolCallContext) -> ApprovalRequest:
+        """Create a short-lived approval request; this does not authorize a call."""
+        violations = self._policy_violations(context)
+        if violations:
+            raise PolicyDenied(f"Cannot request approval for denied call: {violations[0]}")
+        server_policy = self.config.server_policies.get(context.server_id, {})
+        required = set(self.config.approval_required_tools) | set(server_policy.get("approval_required_tools", ()))
+        if context.tool_name not in required:
+            raise ValueError("Tool is not configured to require human approval")
+        request_id = secrets.token_urlsafe(24)
+        now = time.monotonic()
+        expires = now + self.config.approval_ttl_seconds
+        digest = _arguments_digest(context.arguments)
+        with self._state_lock:
+            self._prune_approvals(now)
+            self._approval_requests[request_id] = {
+                "tool": context.tool_name, "server": context.server_id,
+                "session": context.session_id, "caller": context.caller_id, "digest": digest,
+                "expires": expires, "created": now, "status": "pending",
+            }
+        expires_at = datetime.fromtimestamp(time.time() + self.config.approval_ttl_seconds, timezone.utc).isoformat()
+        return ApprovalRequest(request_id, context.tool_name, context.server_id,
+                               context.session_id, expires_at)
+
+    def approve_request(self, request_id: str, approver_id: str) -> str:
+        """Approve one pending request and return a short-lived, single-use token.
+
+        The embedding application must authenticate the human represented by
+        ``approver_id`` before calling this method.
+        """
+        if not approver_id or not isinstance(approver_id, str):
+            raise ValueError("An authenticated approver identifier is required")
+        with self._state_lock:
+            now = time.monotonic()
+            self._prune_approvals(now)
+            request = self._approval_requests.get(request_id)
+            if not request or request["status"] != "pending" or request["expires"] <= now:
+                raise PolicyDenied("Approval request is missing, expired, or already decided")
+            token = secrets.token_urlsafe(32)
+            request.update(status="approved", token=token, approver=approver_id)
+            self._approval_tokens[token] = request_id
+            return token
+
+    def _prune_approvals(self, now: float):
+        expired = [rid for rid, req in self._approval_requests.items() if req["expires"] <= now]
+        for rid in expired:
+            req = self._approval_requests.pop(rid)
+            if req.get("token"):
+                self._approval_tokens.pop(req["token"], None)
+
+    def _approval_matches(self, context: ToolCallContext, token: Optional[str]) -> bool:
+        if not token:
+            return False
+        with self._state_lock:
+            self._prune_approvals(time.monotonic())
+            request_id = self._approval_tokens.get(token)
+            request = self._approval_requests.get(request_id) if request_id else None
+            return bool(request and request["status"] == "approved" and
+                        request["tool"] == context.tool_name and
+                        request["server"] == context.server_id and
+                        request["session"] == context.session_id and
+                        request.get("caller") == context.caller_id and
+                        request["digest"] == _arguments_digest(context.arguments))
+
+    def _consume_approval(self, context: ToolCallContext, token: Optional[str]) -> bool:
+        if not token:
+            return False
+        with self._state_lock:
+            if not self._approval_matches(context, token):
+                return False
+            request_id = self._approval_tokens.pop(token, None)
+            request = self._approval_requests.get(request_id) if request_id else None
+            if not request or request["status"] != "approved":
+                return False
+            request["status"] = "used"
+            return True
+
+    def invoke(self, context: ToolCallContext, fn, approval_token: Optional[str] = None):
+        """Execute a callable only after a permit decision; preserve its result."""
+        decision = self.evaluate(context.tool_name, context.arguments, context.session_id,
+                                 context.server_id, context.caller_id, context.schema,
+                                 approval_token=approval_token)
+        if not decision.allowed:
+            if decision.outcome == Decision.CHALLENGE:
+                raise ApprovalRequired(f"Human approval required: {decision.reason}")
+            raise PolicyDenied(f"Blocked by MCP Guardian: {decision.reason}")
+        if approval_token and not self._consume_approval(context, approval_token):
+            raise PolicyDenied("Approval token is invalid, expired, or already used")
+        return fn(**context.arguments)
+
+    async def ainvoke(self, context: ToolCallContext, fn, approval_token: Optional[str] = None):
+        """Execute a sync or async callable after authorization."""
+        # Scoring is synchronous and bounded; run it before the first await so
+        # cancellation cannot leave an unobserved background policy check.
+        decision = self.evaluate(
+            context.tool_name, context.arguments, context.session_id,
+            context.server_id, context.caller_id, context.schema,
+            approval_token=approval_token,
+        )
+        if not decision.allowed:
+            if decision.outcome == Decision.CHALLENGE:
+                raise ApprovalRequired(f"Human approval required: {decision.reason}")
+            raise PolicyDenied(f"Blocked by MCP Guardian: {decision.reason}")
+        if approval_token and not self._consume_approval(context, approval_token):
+            raise PolicyDenied("Approval token is invalid, expired, or already used")
+        result = fn(**context.arguments)
+        return await result if inspect.isawaitable(result) else result
 
     # ----------------- Feature Extraction -----------------
     def _extract_v1_features(
@@ -126,6 +410,7 @@ class MCPGuardian:
         return feats, now, time_since_last
 
     # ----------------- Core Fast Path Scoring API -----------------
+    @_synchronized
     def check(
         self,
         session_id: str,
@@ -146,7 +431,7 @@ class MCPGuardian:
         if session_id in self.config.allow_list_sessions:
             decision_dict = {
                 "timestamp": time.time(),
-                "session_id": session_id,
+                "session_id": hash_identifier(session_id),
                 "tool": tool_name,
                 "features": {},
                 "anomaly_score": 0.0,
@@ -289,6 +574,16 @@ class MCPGuardian:
         sub_scores["graph"] = graph_score
         if graph_reason:
             reasons_list.append(graph_reason)
+            if graph_reason.type in {
+                "attack_graph_encode_exfiltration_chain",
+                "attack_graph_bulk_exfiltration_chain",
+            }:
+                # These are specific, ordered read/transform/exfiltration
+                # chains; treat them as deterministic critical policy hits.
+                is_hard_blocked = True
+                rule_score = 1.0
+                sub_scores["rules"] = 1.0
+                rule_reason = graph_reason
 
         # 11. Layer 10: Multi-Layer Prompt Injection Analysis
         if prompt_text:
@@ -312,11 +607,14 @@ class MCPGuardian:
             sensitivity=self.config.sensitivity
         )
 
-        # Legacy & V2 block reconciliation
-        is_blocked = (is_hard_blocked or is_ml_blocked or decision == Decision.BLOCK)
+        # ML's raw binary threshold is diagnostic only. A model should contribute
+        # risk through the calibrated fusion score; allowing its separate raw
+        # threshold to override policy thresholds caused normal repeated calls
+        # to be blocked even when the composite decision was below block level.
+        is_blocked = (is_hard_blocked or decision == Decision.BLOCK)
         if is_blocked and decision != Decision.BLOCK:
             decision = Decision.BLOCK
-            risk_level = RiskLevel.CRITICAL if is_hard_blocked else RiskLevel.HIGH
+            risk_level = RiskLevel.CRITICAL
 
         # Determine primary reason string
         if is_hard_blocked and rule_reason:
@@ -326,7 +624,7 @@ class MCPGuardian:
                 primary_reason_str = f"calls_faster_than_{self.config.hard_block_rapid_seconds}s"
             else:
                 primary_reason_str = rule_reason.type
-        elif is_ml_blocked and not is_hard_blocked:
+        elif decision == Decision.BLOCK and not is_hard_blocked:
             primary_reason_str = "ml_anomaly_score"
         elif is_blocked:
             primary_reason_str = reasons_list[0].type if reasons_list else "anomalous_behavior_detected"
@@ -358,7 +656,9 @@ class MCPGuardian:
             reasons=structured_reasons,
             evidence={
                 "features": feats,
-                "arguments": arguments,
+                # Tool arguments can contain credentials, private records, and
+                # attacker-controlled payloads. Keep only derived evidence in
+                # the ordinary audit record.
                 "profile": profile.to_dict(),
                 "adaptive": adap_details,
                 "semantic": actual_summary
@@ -386,7 +686,7 @@ class MCPGuardian:
         # Backward compatible dict representation
         legacy_decision = {
             "timestamp": now,
-            "session_id": session_id,
+            "session_id": hash_identifier(session_id),
             "tool": tool_name,
             "features": feats,
             "anomaly_score": round(raw_if_score, 4),
@@ -406,9 +706,16 @@ class MCPGuardian:
         if self.verbose:
             tag = f"🚩 [{decision.value}] ({primary_reason_str})" if is_blocked else f"  [{decision.value}]"
             try:
-                print(f"[MCP Guardian V2] {tag} | session={session_id[:8]} tool={tool_name} risk={composite_score:.3f} ({latency_ms}ms)")
-            except UnicodeEncodeError:
-                print(f"[MCP Guardian V2] [{decision.value}] ({primary_reason_str}) | session={session_id[:8]} tool={tool_name} risk={composite_score:.3f}")
+                logging.getLogger("mcp_guardian").info(
+                    "%s | session=%s tool=%s risk=%.3f (%sms)", tag,
+                    hash_identifier(session_id)[:8], tool_name, composite_score, latency_ms,
+                )
+            except (UnicodeEncodeError, ValueError):
+                logging.getLogger("mcp_guardian").info(
+                    "[%s] (%s) | session=%s tool=%s risk=%.3f",
+                    decision.value, primary_reason_str, hash_identifier(session_id)[:8],
+                    tool_name, composite_score,
+                )
 
         return legacy_decision
 
@@ -416,37 +723,69 @@ class MCPGuardian:
     def protect(self, records_fn=None, recipient_check_fn=None, is_email=False, on_block=None):
         """Decorator for wrapping MCP tool functions with V2 adaptive protection."""
         def decorator(fn):
-            @wraps(fn)
-            def wrapper(*args, **kwargs):
-                session_id = kwargs.get("session_id", "default")
+            def authorize(args, kwargs):
+                try:
+                    bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+                    tool_arguments = {k: v for k, v in bound.arguments.items() if k not in {"self", "cls"}}
+                except (TypeError, ValueError):
+                    tool_arguments = dict(kwargs)
+                session_id = tool_arguments.get("session_id", "default")
                 if records_fn:
-                    records = records_fn(kwargs)
+                    records = records_fn(tool_arguments)
                 else:
-                    oid = kwargs.get("order_id")
-                    records = 500 if str(oid).upper() == "ALL" else 1
+                    # Infer common bulk selectors at the SDK boundary. The tool
+                    # schema remains authoritative; this is a conservative
+                    # signal, not a substitute for schema validation.
+                    records = 1
+                    for key in ("records", "record_count", "count", "limit", "order_id", "id"):
+                        if key not in tool_arguments:
+                            continue
+                        value = tool_arguments[key]
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            records = max(1, int(value))
+                        elif str(value).strip().upper() in {"ALL", "*", "ANY", "EVERYTHING"}:
+                            records = self.config.hard_block_bulk_threshold + 1
+                        break
 
-                mismatch = recipient_check_fn(kwargs) if recipient_check_fn else False
-
-                decision = self.check(
+                mismatch = recipient_check_fn(tool_arguments) if recipient_check_fn else False
+                return tool_arguments, self.evaluate(
                     session_id=session_id,
                     tool_name=fn.__name__,
                     records_this_call=records,
                     recipient_mismatch=mismatch,
                     is_email=is_email,
-                    arguments=kwargs
+                    arguments=tool_arguments
                 )
 
-                if decision["blocked"]:
-                    if on_block:
-                        return on_block(kwargs, decision)
-                    return {
+            def blocked(kwargs, decision):
+                if on_block:
+                    return on_block(kwargs, {
+                        "reason": decision.reason, "reasons": decision.matched_rules,
+                        "risk_score": decision.risk_score, "decision_id": decision.decision_id,
+                    })
+                return {
                         "status": "blocked_by_guardian",
-                        "reason": decision["reason"],
-                        "reasons": decision["reasons"],
-                        "risk_score": decision["anomaly_score"],
-                        "correlation_id": decision["correlation_id"]
+                        "reason": decision.reason,
+                        "reasons": decision.matched_rules,
+                        "risk_score": decision.risk_score,
+                        "decision_id": decision.decision_id,
                     }
 
+            if inspect.iscoroutinefunction(fn):
+                @wraps(fn)
+                async def async_wrapper(*args, **kwargs):
+                    tool_arguments, decision = authorize(args, kwargs)
+                    if not decision.allowed:
+                        result = blocked(tool_arguments, decision)
+                        return await result if inspect.isawaitable(result) else result
+                    return await fn(*args, **kwargs)
+                return async_wrapper
+
+            @wraps(fn)
+            def wrapper(*args, **kwargs):
+                tool_arguments, decision = authorize(args, kwargs)
+                if not decision.allowed:
+                    return blocked(tool_arguments, decision)
                 return fn(*args, **kwargs)
             return wrapper
         return decorator
@@ -485,7 +824,7 @@ class MCPGuardian:
         Raises PermissionError if blocked.
         """
         arguments = arguments or {}
-        decision = self.check(
+        decision = self.evaluate(
             session_id=session_id,
             tool_name=tool_name,
             records_this_call=records_this_call,
@@ -495,8 +834,8 @@ class MCPGuardian:
             prompt_text=prompt_text,
             **kwargs
         )
-        if decision.get("blocked"):
-            raise PermissionError(f"Blocked by MCP Guardian: {decision.get('reason')}")
+        if not decision.allowed:
+            raise PolicyDenied(f"Blocked by MCP Guardian: {decision.reason}")
         return fn(**arguments) if callable(fn) else decision
 
     # ----------------- Reporting & Metrics -----------------
@@ -545,6 +884,18 @@ def protect_server(server_instance, guardian: Optional[MCPGuardian] = None) -> M
     elif hasattr(server_instance, "tools") and isinstance(server_instance.tools, dict):
         for tool_name, tool_fn in list(server_instance.tools.items()):
             if callable(tool_fn):
-                server_instance.tools[tool_name] = g.protect()(tool_fn)
+                def infer_records(arguments):
+                    for key in ("records", "record_count", "count", "limit", "order_id", "id"):
+                        if key not in arguments:
+                            continue
+                        value = arguments[key]
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            return max(1, int(value))
+                        if str(value).strip().upper() in {"ALL", "*", "ANY", "EVERYTHING"}:
+                            return g.config.hard_block_bulk_threshold + 1
+                        break
+                    return 1
+
+                server_instance.tools[tool_name] = g.protect(records_fn=infer_records)(tool_fn)
 
     return g

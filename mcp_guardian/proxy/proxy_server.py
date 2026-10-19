@@ -11,12 +11,14 @@ import sys
 import json
 import time
 import argparse
+import hashlib
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -35,7 +37,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     app.mount("/guardian/static", StaticFiles(directory=STATIC_DIR, html=True), name="guardian-static")
 
-STATE = {"upstream_url": None, "guardian": None, "registry": None}
+STATE = {"upstream_url": None, "guardian": None, "registry": None, "http_client": None}
 
 import asyncio
 
@@ -64,15 +66,23 @@ async def discover_upstream_tools():
         print(f"[MCP Guardian V2] Startup auto-discovery notice: {e}")
 
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(discover_upstream_tools())
+@app.on_event("shutdown")
+async def shutdown_event():
+    client = STATE.get("http_client")
+    if client is not None:
+        await client.aclose()
+        STATE["http_client"] = None
 
 
-def configure(upstream_url: str, config_path: str = None, sensitivity: float = 1.0):
+def configure(upstream_url: str, config_path: str = None, sensitivity: float = 1.0,
+             guardian_config: Optional[GuardianConfig] = None):
     STATE["upstream_url"] = upstream_url.rstrip("/")
-    STATE["guardian"] = MCPGuardian(verbose=True, config=GuardianConfig(sensitivity=sensitivity))
+    STATE["guardian"] = MCPGuardian(verbose=False, config=guardian_config or GuardianConfig(sensitivity=sensitivity))
     STATE["registry"] = RiskProfileRegistry(config_path)
+    if STATE.get("http_client") is None or STATE["http_client"].is_closed:
+        STATE["http_client"] = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=5.0), follow_redirects=False
+        )
 
 
 # =====================================================================
@@ -81,15 +91,38 @@ def configure(upstream_url: str, config_path: str = None, sensitivity: float = 1
 
 @app.post("/mcp")
 async def handle_mcp_request(request: Request):
-    body = await request.json()
+    if not STATE.get("upstream_url") or not STATE.get("guardian"):
+        return JSONResponse({"error": "MCP Guardian upstream is not configured"}, status_code=503)
+    if request.headers.get("content-length"):
+        try:
+            if int(request.headers["content-length"]) > STATE["guardian"].config.max_argument_bytes:
+                return JSONResponse({"error": "Request exceeds configured size limit"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+    max_body = STATE["guardian"].config.max_argument_bytes
+    body_chunks = []
+    body_size = 0
+    async for chunk in request.stream():
+        body_size += len(chunk)
+        if body_size > max_body:
+            return JSONResponse({"error": "Request exceeds configured size limit"}, status_code=413)
+        body_chunks.append(chunk)
+    raw_body = b"".join(body_chunks)
+    try:
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, status_code=400)
+    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0":
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}, status_code=400)
     method = body.get("method")
 
     # Non-action protocol messages pass straight through, untouched.
     if method != "tools/call":
-        response = await _forward(body, request.headers)
+        response = await _forward("POST", request.url.path, raw_body, request.headers, request.url.query)
         if method == "tools/list":
             try:
-                resp_data = json.loads(response.body.decode("utf-8"))
+                payload = getattr(response, "body", b"")
+                resp_data = json.loads(payload.decode("utf-8"))
                 tools = resp_data.get("result", {}).get("tools", [])
                 if STATE.get("registry"):
                     STATE["registry"].auto_discover_profiles(tools)
@@ -99,17 +132,24 @@ async def handle_mcp_request(request: Request):
                 print(f"[MCP Guardian V2] Error during tools/list discovery: {e}")
         return response
 
+    if not isinstance(body.get("id"), (str, int, float)) or isinstance(body.get("id"), bool):
+        if body.get("id") is not None:
+            return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request id"}}, status_code=400)
     params = body.get("params", {})
+    if not isinstance(params, dict):
+        return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32602, "message": "Invalid params"}}, status_code=400)
     tool_name = params.get("name")
     arguments = params.get("arguments", {})
-    session_id = (
-        request.headers.get("x-session-id")
-        or arguments.get("session_id")
-        or "default"
-    )
+    if not isinstance(tool_name, str) or not tool_name or not isinstance(arguments, dict):
+        return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32602, "message": "tools/call requires a tool name and object arguments"}}, status_code=400)
+    # This opaque transport token is used only for session correlation, never as
+    # an authenticated caller identity. Argument/header identity claims are ignored.
+    upstream_session = request.headers.get("mcp-session-id")
+    session_id = (hashlib.sha256(f"{request.client.host if request.client else 'unknown'}:{upstream_session}".encode()).hexdigest()
+                  if upstream_session else f"unbound:{uuid.uuid4()}")
 
     records, recipient_mismatch, is_email = STATE["registry"].evaluate_call(tool_name, arguments)
-    decision = STATE["guardian"].check(
+    decision = STATE["guardian"].evaluate(
         session_id=session_id,
         tool_name=tool_name,
         records_this_call=records,
@@ -118,27 +158,29 @@ async def handle_mcp_request(request: Request):
         arguments=arguments
     )
 
-    if decision["blocked"]:
+    if not decision.allowed:
+        if body.get("id") is None:
+            return Response(status_code=202)
         return JSONResponse({
             "jsonrpc": "2.0",
             "id": body.get("id"),
             "error": {
                 "code": -32001,
-                "message": f"Blocked by MCP Guardian V2: {decision['reason']}",
+                "message": f"Blocked by MCP Guardian V2: {decision.reason}",
                 "data": {
-                    "reason": decision["reason"],
-                    "reasons": decision.get("reasons", []),
-                    "risk_score": decision.get("risk_score", decision.get("anomaly_score", 0.9)),
-                    "correlation_id": decision.get("correlation_id")
+                    "reason": decision.reason,
+                    "matched_rules": decision.matched_rules,
+                    "risk_score": decision.risk_score,
+                    "correlation_id": decision.evidence.get("correlation_id")
                 },
             },
-        }, status_code=403)
+        }, status_code=200)
 
     # Forward allowed request to real upstream server
-    resp = await _forward(body, request.headers)
+    resp = await _forward("POST", request.url.path, raw_body, request.headers, request.url.query)
 
     # Stateful Entity Binding: capture order data from upstream response
-    if tool_name == "get_customer_order" and resp.status_code == 200:
+    if tool_name == "get_customer_order" and resp.status_code == 200 and hasattr(resp, "body"):
         try:
             resp_json = json.loads(resp.body.decode("utf-8"))
             order_data = resp_json.get("result", {}).get("order", {})
@@ -150,13 +192,59 @@ async def handle_mcp_request(request: Request):
     return resp
 
 
-async def _forward(body: dict, headers):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{STATE['upstream_url']}/mcp", json=body,
-            headers={"content-type": "application/json"}, timeout=30.0,
-        )
-    return JSONResponse(resp.json(), status_code=resp.status_code)
+_HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+               "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
+
+
+async def _forward(method: str, path: str, body: bytes = b"", headers=None, query: str = ""):
+    """Stream an MCP HTTP request/response while preserving end-to-end headers."""
+    client = STATE.get("http_client")
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0), follow_redirects=False)
+        STATE["http_client"] = client
+    forwarded = {k: v for k, v in (headers or {}).items() if k.lower() not in _HOP_BY_HOP}
+    url = f"{STATE['upstream_url']}{path}" + (f"?{query}" if query else "")
+    try:
+        upstream = await client.send(client.build_request(method, url, content=body or None, headers=forwarded), stream=True)
+    except httpx.TimeoutException:
+        return JSONResponse({"error": "MCP upstream timed out"}, status_code=504)
+    except httpx.HTTPError:
+        return JSONResponse({"error": "MCP upstream connection failed"}, status_code=502)
+    response_headers = {k: v for k, v in upstream.headers.items()
+                        if k.lower() not in _HOP_BY_HOP and k.lower() not in {"content-encoding", "content-length"}}
+    content_type = upstream.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            content = await upstream.aread()
+        finally:
+            await upstream.aclose()
+        if len(content) > 16 * 1024 * 1024:
+            return JSONResponse({"error": "MCP upstream response exceeded 16 MiB"}, status_code=502)
+        return Response(content=content, status_code=upstream.status_code, headers=response_headers)
+
+    async def stream_body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(stream_body(), status_code=upstream.status_code,
+                             headers=response_headers, media_type=None)
+
+
+@app.get("/mcp")
+async def handle_mcp_stream(request: Request):
+    if not STATE.get("upstream_url"):
+        return JSONResponse({"error": "MCP Guardian upstream is not configured"}, status_code=503)
+    return await _forward("GET", request.url.path, headers=request.headers, query=request.url.query)
+
+
+@app.delete("/mcp")
+async def handle_mcp_delete(request: Request):
+    if not STATE.get("upstream_url"):
+        return JSONResponse({"error": "MCP Guardian upstream is not configured"}, status_code=503)
+    return await _forward("DELETE", request.url.path, headers=request.headers, query=request.url.query)
 
 
 # =====================================================================
@@ -461,10 +549,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MCP Guardian V2 Gateway")
     parser.add_argument("--upstream", required=True, help="Upstream MCP Server URL (e.g. http://localhost:8100)")
     parser.add_argument("--config", default=None, help="Path to tool risk config JSON")
+    parser.add_argument("--guardian-config", default=None, help="Path to Guardian policy JSON")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--sensitivity", type=float, default=1.0)
     args = parser.parse_args()
 
-    configure(args.upstream, args.config, args.sensitivity)
+    guardian_config = GuardianConfig.from_file(args.guardian_config) if args.guardian_config else None
+    configure(args.upstream, args.config, args.sensitivity, guardian_config=guardian_config)
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=args.port)

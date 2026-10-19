@@ -1,6 +1,6 @@
 """
 Quickstart Example: Protecting an MCP Server with MCP Guardian in 1 Line.
-Requires: pip install mcp mcp-guardian
+Requires: pip install "mcp-guardian-shield[proxy]" mcp
 """
 
 from mcp.server.fastmcp import FastMCP

@@ -35,12 +35,13 @@ ORDER_TO_CUSTOMER = {v["order_id"]: k for k, v in CUSTOMER_DB.items()}
 class MCPServer:
     """Minimal MCP-style server: receives a tool call, executes it, logs it."""
 
-    def __init__(self):
+    def __init__(self, log_path: Path = LOG_PATH):
         self.session_state = {}  # tracks last lookup per session, for legitimacy checks
+        self.log_path = Path(log_path)
 
     def _log(self, record: dict):
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG_PATH, "a") as f:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
     def handle_request(self, session_id: str, tool: str, params: dict, request_time: float = None):
@@ -50,7 +51,8 @@ class MCPServer:
         """
         t0 = request_time if request_time is not None else time.time()
         record = {
-            "request_id": str(uuid.uuid4()),
+            # Seeded IDs make the simulator's generated files reproducible.
+            "request_id": str(uuid.UUID(int=random.getrandbits(128))),
             "session_id": session_id,
             "timestamp": t0,
             "tool": tool,

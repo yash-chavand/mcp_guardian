@@ -4,7 +4,8 @@ MCP Guardian — Production-Grade Adaptive Security Gateway for Model Context Pr
 
 from .guardian import MCPGuardian, Guardian, protect_server
 from .core.config import GuardianV2Config as GuardianConfig, RiskWeights
-from .core.types import Decision, RiskLevel
+from .core.types import Decision, RiskLevel, SecurityDecision, ToolCallContext, ApprovalRequest
+from .exceptions import GuardianError, ConfigurationError, PolicyDenied, ApprovalRequired, ArgumentValidationError
 
 _lazy_default_guardian = None
 
@@ -39,6 +40,14 @@ __all__ = [
     "RiskWeights",
     "Decision",
     "RiskLevel",
+    "SecurityDecision",
+    "ToolCallContext",
+    "ApprovalRequest",
+    "GuardianError",
+    "ConfigurationError",
+    "PolicyDenied",
+    "ApprovalRequired",
+    "ArgumentValidationError",
     "protect",
     "protect_server",
     "get_default_guardian",

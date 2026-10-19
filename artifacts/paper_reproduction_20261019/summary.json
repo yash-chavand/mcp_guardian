@@ -1,0 +1,266 @@
+{
+  "allow_all": {
+    "precision": {
+      "mean": 0.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.0,
+        0.0
+      ]
+    },
+    "recall": {
+      "mean": 0.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.0,
+        0.0
+      ]
+    },
+    "f1": {
+      "mean": 0.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.0,
+        0.0
+      ]
+    },
+    "roc_auc": {
+      "mean": 0.5,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.5,
+        0.5
+      ]
+    },
+    "average_precision": {
+      "mean": 0.1666666666666667,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.1666666666666667,
+        0.1666666666666667
+      ]
+    },
+    "balanced_accuracy": {
+      "mean": 0.5,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.5,
+        0.5
+      ]
+    },
+    "specificity": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "false_positive_rate": {
+      "mean": 0.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "explicit_rules": {
+    "precision": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "recall": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "f1": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "roc_auc": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "average_precision": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "balanced_accuracy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "specificity": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "false_positive_rate": {
+      "mean": 0.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "isolation_forest": {
+    "precision": {
+      "mean": 0.5520012304047438,
+      "std": 0.06823258453416263,
+      "ci95_normal_approx": [
+        0.527584513610001,
+        0.5764179471994866
+      ]
+    },
+    "recall": {
+      "mean": 0.9097222222222224,
+      "std": 0.06481196399495838,
+      "ci95_normal_approx": [
+        0.8865295587670715,
+        0.9329148856773734
+      ]
+    },
+    "f1": {
+      "mean": 0.6845657913480344,
+      "std": 0.06001749238023113,
+      "ci95_normal_approx": [
+        0.663088807525957,
+        0.7060427751701118
+      ]
+    },
+    "roc_auc": {
+      "mean": 0.9603761574074074,
+      "std": 0.026791630919862305,
+      "ci95_normal_approx": [
+        0.9507888954107286,
+        0.9699634194040863
+      ]
+    },
+    "average_precision": {
+      "mean": 0.9007944227521288,
+      "std": 0.05413047469905346,
+      "ci95_normal_approx": [
+        0.8814240811519212,
+        0.9201647643523365
+      ]
+    },
+    "balanced_accuracy": {
+      "mean": 0.8788888888888889,
+      "std": 0.03828103212008265,
+      "ci95_normal_approx": [
+        0.8651901974752796,
+        0.8925875803024983
+      ]
+    },
+    "specificity": {
+      "mean": 0.8480555555555556,
+      "std": 0.04080625030380714,
+      "ci95_normal_approx": [
+        0.8334532264202054,
+        0.8626578846909058
+      ]
+    },
+    "false_positive_rate": {
+      "mean": 0.15194444444444447,
+      "std": 0.04080625030380715,
+      "ci95_normal_approx": [
+        0.1373421153090943,
+        0.16654677357979464
+      ]
+    }
+  },
+  "supervised_logistic": {
+    "precision": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "recall": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "f1": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "roc_auc": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "average_precision": {
+      "mean": 0.9999999999999999,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.9999999999999999,
+        0.9999999999999999
+      ]
+    },
+    "balanced_accuracy": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "specificity": {
+      "mean": 1.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        1.0,
+        1.0
+      ]
+    },
+    "false_positive_rate": {
+      "mean": 0.0,
+      "std": 0.0,
+      "ci95_normal_approx": [
+        0.0,
+        0.0
+      ]
+    }
+  }
+}

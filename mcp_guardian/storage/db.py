@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from ..core.events import SecurityEvent
+from ..core.events import SecurityEvent, hash_identifier
 
 
 class SecurityStorage:
@@ -105,7 +105,7 @@ class SecurityStorage:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         event.event_id, event.timestamp, event.correlation_id,
-                        event.session_id, event.tokenized_session_id, event.agent_id,
+                        event.tokenized_session_id, event.tokenized_session_id, event.tokenized_agent_id,
                         event.server_id, event.tool_name, event.event_type,
                         event.risk_score, event.risk_level, event.decision,
                         json.dumps(event.sub_scores), json.dumps(event.reasons),
@@ -131,7 +131,7 @@ class SecurityStorage:
             params.append(risk_level)
         if session_id:
             query += " AND session_id = ?"
-            params.append(session_id)
+            params.append(hash_identifier(session_id))
 
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)

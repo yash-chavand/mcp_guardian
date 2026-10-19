@@ -1,0 +1,18 @@
+{
+  "policy_version": "agent-test-1",
+  "default_deny": true,
+  "allowed_tools": ["read_public_note"],
+  "denied_tools": ["delete_everything"],
+  "max_argument_bytes": 16384,
+  "max_argument_depth": 8,
+  "tool_schemas": {
+    "read_public_note": {
+      "type": "object",
+      "properties": {
+        "note_id": {"type": "string", "maxLength": 64}
+      },
+      "required": ["note_id"],
+      "additionalProperties": false
+    }
+  }
+}

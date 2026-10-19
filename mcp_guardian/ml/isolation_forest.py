@@ -4,8 +4,13 @@ Isolation Forest Real-Time Inference Scorer for MCP Guardian V2.
 
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
-import joblib
-import pandas as pd
+import logging
+try:
+    import joblib
+    import pandas as pd
+except ImportError:  # optional anomaly-model dependencies
+    joblib = None
+    pd = None
 from ..core.events import RiskReason
 
 DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "realtime_model.joblib"
@@ -24,13 +29,16 @@ class IsolationForestScorer:
         self._load()
 
     def _load(self):
-        if self.model_path and Path(self.model_path).exists():
+        if self.model_path and Path(self.model_path).exists() and joblib is not None and pd is not None:
             try:
                 bundle = joblib.load(self.model_path)
                 self.model = bundle["model"]
                 self.feature_cols = bundle.get("feature_cols", self.feature_cols)
             except Exception as e:
-                print(f"[IsolationForest] Load error ({e}), initialized fallback.")
+                logging.getLogger("mcp_guardian").warning(
+                    "Isolation Forest model could not be loaded; using rules-only fallback (%s)",
+                    type(e).__name__,
+                )
 
     def score(self, features: Dict[str, Any], sensitivity: float = 1.0) -> Tuple[float, float, bool, Optional[RiskReason]]:
         """
@@ -38,10 +46,10 @@ class IsolationForestScorer:
         Returns: (raw_score, normalized_score [0.0, 1.0], is_blocked [bool], Optional[RiskReason])
         """
         if self.model is None:
-            rec = features.get("records_requested", 1)
-            mis = features.get("recipient_mismatch", 0)
-            blocked = (rec > 10 or mis == 1)
-            return (0.90 if blocked else 0.10), (0.90 if blocked else 0.10), blocked, None
+            # Rules-only installation: deterministic controls remain active in
+            # RuleEngine. Missing optional ML dependencies never fail open for
+            # the rules and never invent an ML verdict.
+            return 0.0, 0.0, False, None
 
         X = pd.DataFrame([features])[self.feature_cols]
         raw_score = float(-self.model.decision_function(X)[0])

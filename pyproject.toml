@@ -1,19 +1,19 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcp-guardian"
+name = "mcp-guardian-shield"
 version = "0.2.0"
-description = "Real-time behavioral anomaly detection gateway & firewall for Model Context Protocol (MCP) servers and AI agents."
+description = "Policy enforcement and behavioral security gateway for MCP servers and AI agents."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "MCP Guardian Authors" }]
 keywords = ["mcp", "model-context-protocol", "security", "ai-agents", "anomaly-detection", "firewall", "guardrails"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -21,17 +21,21 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
-requires-python = ">=3.9"
-dependencies = [
-    "scikit-learn>=1.3",
-    "pandas>=2.0",
-    "joblib>=1.3",
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
-    "httpx>=0.27",
-]
+requires-python = ">=3.9,<3.13"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+ml = ["scikit-learn>=1.3", "pandas>=2.0", "joblib>=1.3"]
+proxy = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
+dev = ["pytest>=8.3", "pytest-mock>=3.14", "build>=1.2", "ruff>=0.6", "mypy>=1.11"]
+interop = ["mcp>=2.0,<3"]
 
 [project.scripts]
+mcp-guardian-shield = "mcp_guardian.cli:main"
+mcp-guardian-shield-proxy = "mcp_guardian.proxy.cli:main"
+mcp-guardian-shield-stdio = "mcp_guardian.proxy.stdio_cli:main"
+# Keep the original local command names as aliases for existing checkouts.
+mcp-guardian = "mcp_guardian.cli:main"
 mcp-guardian-proxy = "mcp_guardian.proxy.cli:main"
 mcp-guardian-stdio = "mcp_guardian.proxy.stdio_cli:main"
 
@@ -40,3 +44,6 @@ include = ["mcp_guardian*"]
 
 [tool.setuptools.package-data]
 mcp_guardian = ["*.joblib", "proxy/static/**/*", "proxy/static/**/**/*", "examples/*"]
+
+[tool.pytest.ini_options]
+markers = ["integration: exercises a real subprocess transport against an MCP SDK client/server"]
